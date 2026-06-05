@@ -1,0 +1,8 @@
+{
+  "name": "sumaaru",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.107.0"
+  }
+}

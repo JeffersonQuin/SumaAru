@@ -1,5 +1,7 @@
-// URL del backend (cambiar cuando esté en Vercel)
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000/api'
+// En Vercel: mismo dominio (/api). En local: Express en :3000
+const API_URL =
+  import.meta.env.VITE_API_URL ||
+  (import.meta.env.PROD ? '/api' : 'http://localhost:3000/api')
 
 // Guardar una grabación
 export async function guardarGrabacion(audioBlob, datos) {
