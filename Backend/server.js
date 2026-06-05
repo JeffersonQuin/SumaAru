@@ -11,7 +11,7 @@ const port = 3000
 
 // Middleware
 app.use(cors())
-app.use(express.json())
+app.use(express.json({ limit: '15mb' }))
 
 // Configurar multer para procesar archivos
 const upload = multer({ storage: multer.memoryStorage() })
@@ -27,24 +27,51 @@ if (!supabaseUrl || !supabaseKey) {
 
 const supabase = createClient(supabaseUrl, supabaseKey)
 
-// Endpoint para guardar grabación
-app.post('/api/grabar', upload.single('audio'), async (req, res) => {
+// Endpoint para guardar grabación (JSON base64 o FormData)
+app.post('/api/grabar', (req, res, next) => {
+  const ct = req.headers['content-type'] || ''
+  if (ct.includes('application/json')) {
+    return next()
+  }
+  upload.single('audio')(req, res, next)
+}, async (req, res) => {
   console.log('📥 Recibida petición POST /api/grabar')
   
   try {
-    // Verificar archivo
-    if (!req.file) {
-      console.log('❌ No se recibió archivo')
+    let audioBuffer
+    let hablante
+    let tipoGrabacion
+    let duracion
+    let transcripcion
+
+    if (req.body?.audioBase64) {
+      audioBuffer = Buffer.from(req.body.audioBase64, 'base64')
+      hablante = req.body.hablante
+      tipoGrabacion = req.body.tipoGrabacion
+      duracion = req.body.duracion
+      transcripcion = req.body.transcripcion
+    } else {
+      if (!req.file) {
+        console.log('❌ No se recibió archivo')
+        return res.status(400).json({ error: 'No se recibió archivo de audio' })
+      }
+      if (!req.body.hablante) {
+        return res.status(400).json({ error: 'Faltan datos del hablante' })
+      }
+      audioBuffer = req.file.buffer
+      hablante = JSON.parse(req.body.hablante)
+      tipoGrabacion = req.body.tipoGrabacion
+      duracion = req.body.duracion
+      transcripcion = req.body.transcripcion
+    }
+
+    if (!audioBuffer?.length) {
       return res.status(400).json({ error: 'No se recibió archivo de audio' })
     }
-    
-    // Verificar datos del hablante
-    if (!req.body.hablante) {
-      console.log('❌ No se recibieron datos del hablante')
+    if (!hablante?.nombre || !hablante?.dialecto) {
       return res.status(400).json({ error: 'Faltan datos del hablante' })
     }
-    
-    const hablante = JSON.parse(req.body.hablante)
+
     console.log(`👤 Hablante: ${hablante.nombre}`)
     
     // Generar nombre único
@@ -54,7 +81,7 @@ app.post('/api/grabar', upload.single('audio'), async (req, res) => {
     // Subir a Supabase Storage
     const { data: uploadData, error: uploadError } = await supabase.storage
       .from('audios')
-      .upload(nombreArchivo, req.file.buffer, {
+      .upload(nombreArchivo, audioBuffer, {
         contentType: 'audio/wav',
         cacheControl: '3600'
       })
@@ -111,10 +138,10 @@ app.post('/api/grabar', upload.single('audio'), async (req, res) => {
       .from('grabaciones')
       .insert({
         id_hablante: idHablante,
-        tipo_grabacion: req.body.tipoGrabacion || 'historia',
-        duracion_segundos: parseInt(req.body.duracion || '0'),
+        tipo_grabacion: tipoGrabacion || 'historia',
+        duracion_segundos: parseInt(String(duracion || '0'), 10),
         audio_url: urlData.publicUrl,
-        transcripcion_web_speech: req.body.transcripcion || null
+        transcripcion_web_speech: transcripcion || null
       })
       .select()
       .single()

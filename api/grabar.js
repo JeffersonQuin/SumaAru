@@ -1,31 +1,19 @@
-import Busboy from 'busboy'
-import { supabase } from './supabaseClient.js'
+import { supabase, assertSupabaseConfig } from './supabaseClient.js'
+import { saveGrabacion } from './saveGrabacion.js'
 
-function parseMultipart(req) {
+function readJsonBody(req) {
   return new Promise((resolve, reject) => {
-    const fields = {}
-    let audioBuffer = null
-
-    const busboy = Busboy({ headers: req.headers })
-
-    busboy.on('file', (name, file) => {
-      const chunks = []
-      file.on('data', (chunk) => chunks.push(chunk))
-      file.on('end', () => {
-        if (name === 'audio') {
-          audioBuffer = Buffer.concat(chunks)
-        }
-      })
+    const chunks = []
+    req.on('data', (chunk) => chunks.push(chunk))
+    req.on('end', () => {
+      try {
+        const raw = Buffer.concat(chunks).toString('utf8')
+        resolve(raw ? JSON.parse(raw) : {})
+      } catch (e) {
+        reject(new Error('JSON inválido en el cuerpo de la petición'))
+      }
     })
-
-    busboy.on('field', (name, value) => {
-      fields[name] = value
-    })
-
-    busboy.on('finish', () => resolve({ fields, audioBuffer }))
-    busboy.on('error', reject)
-
-    req.pipe(busboy)
+    req.on('error', reject)
   })
 }
 
@@ -35,111 +23,41 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { fields, audioBuffer } = await parseMultipart(req)
+    assertSupabaseConfig()
 
-    if (!audioBuffer?.length) {
-      return res.status(400).json({ error: 'No se recibió archivo de audio' })
+    const body = await readJsonBody(req)
+
+    if (!body.audioBase64) {
+      return res.status(400).json({ error: 'Falta audioBase64 en el cuerpo' })
     }
 
-    const datosHablante = JSON.parse(fields.hablante || '{}')
-    const tipoGrabacion = fields.tipoGrabacion || 'historia'
-    const duracion = parseInt(fields.duracion || '0', 10)
-    const transcripcion = fields.transcripcion || ''
+    const audioBuffer = Buffer.from(body.audioBase64, 'base64')
+    const hablante =
+      typeof body.hablante === 'string'
+        ? JSON.parse(body.hablante)
+        : body.hablante
 
-    if (!datosHablante.nombre || !datosHablante.dialecto) {
-      return res.status(400).json({ error: 'Faltan datos del hablante' })
-    }
-
-    const timestamp = Date.now()
-    const nombreLimpio = datosHablante.nombre.replace(/\s/g, '_')
-    const nombreArchivo = `${timestamp}_${nombreLimpio}_${tipoGrabacion}.wav`
-
-    const { error: audioError } = await supabase.storage
-      .from('audios')
-      .upload(nombreArchivo, audioBuffer, {
-        contentType: 'audio/wav',
-        cacheControl: '3600'
-      })
-
-    if (audioError) {
-      console.error('Error al subir a Storage:', audioError)
-      return res.status(500).json({
-        error: 'Error al guardar el audio',
-        details: audioError.message
-      })
-    }
-
-    const { data: urlData } = supabase.storage
-      .from('audios')
-      .getPublicUrl(nombreArchivo)
-
-    const audioUrl = urlData.publicUrl
-
-    let idHablante
-
-    const { data: hablanteExistente } = await supabase
-      .from('hablantes')
-      .select('id')
-      .eq('nombre', datosHablante.nombre)
-      .eq('dialecto', datosHablante.dialecto)
-      .maybeSingle()
-
-    if (hablanteExistente) {
-      idHablante = hablanteExistente.id
-    } else {
-      const { data: nuevoHablante, error: hablanteError } = await supabase
-        .from('hablantes')
-        .insert({
-          nombre: datosHablante.nombre,
-          edad: datosHablante.edad ? parseInt(datosHablante.edad, 10) : null,
-          comunidad: datosHablante.comunidad || null,
-          dialecto: datosHablante.dialecto
-        })
-        .select()
-        .single()
-
-      if (hablanteError) {
-        console.error('Error al guardar hablante:', hablanteError)
-        return res.status(500).json({
-          error: 'Error al guardar el hablante',
-          details: hablanteError.message
-        })
-      }
-
-      idHablante = nuevoHablante.id
-    }
-
-    const { data: grabacion, error: grabacionError } = await supabase
-      .from('grabaciones')
-      .insert({
-        id_hablante: idHablante,
-        tipo_grabacion: tipoGrabacion,
-        duracion_segundos: duracion,
-        audio_url: audioUrl,
-        transcripcion_web_speech: transcripcion || null
-      })
-      .select()
-      .single()
-
-    if (grabacionError) {
-      console.error('Error al guardar grabación:', grabacionError)
-      return res.status(500).json({
-        error: 'Error al guardar la grabación',
-        details: grabacionError.message
-      })
-    }
+    const result = await saveGrabacion(supabase, {
+      audioBuffer,
+      hablante,
+      tipoGrabacion: body.tipoGrabacion || 'historia',
+      duracion: body.duracion ?? 0,
+      transcripcion: body.transcripcion || ''
+    })
 
     return res.status(200).json({
       success: true,
-      id: grabacion.id,
-      audioUrl,
+      id: result.id,
+      audioUrl: result.audioUrl,
       mensaje: 'Grabación guardada exitosamente'
     })
   } catch (error) {
-    console.error('Error general en /api/grabar:', error)
-    return res.status(500).json({
-      error: 'Error interno del servidor',
-      details: error.message
+    console.error('Error en /api/grabar:', error)
+    const msg = error.message || 'Error desconocido'
+    const isConfig = msg.includes('Supabase') || msg.includes('entorno')
+    return res.status(isConfig ? 503 : 500).json({
+      error: isConfig ? 'API sin configurar en Vercel' : 'Error al guardar',
+      details: msg
     })
   }
 }

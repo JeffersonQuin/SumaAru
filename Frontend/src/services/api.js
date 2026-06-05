@@ -15,7 +15,24 @@ function resolveApiUrl() {
   return 'http://localhost:3000/api'
 }
 
-const API_URL = resolveApiUrl()
+export const API_URL = resolveApiUrl()
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onloadend = () => {
+      const result = reader.result
+      if (typeof result !== 'string') {
+        reject(new Error('No se pudo leer el audio'))
+        return
+      }
+      const base64 = result.includes(',') ? result.split(',')[1] : result
+      resolve(base64)
+    }
+    reader.onerror = () => reject(new Error('Error al leer el archivo de audio'))
+    reader.readAsDataURL(blob)
+  })
+}
 
 async function parseJsonResponse(response) {
   const text = await response.text()
@@ -24,42 +41,56 @@ async function parseJsonResponse(response) {
   } catch {
     throw new Error(
       text.startsWith('<')
-        ? `La API no respondió JSON (${response.status}). ¿Ruta /api correcta?`
-        : text.slice(0, 120) || `Error HTTP ${response.status}`
+        ? `La API devolvió HTML (${response.status}). Revisa /api/grabar en Vercel.`
+        : text.slice(0, 150) || `Error HTTP ${response.status}`
     )
   }
 }
 
-// Guardar una grabación
+function wrapFetchError(error) {
+  if (error?.message === 'Failed to fetch') {
+    return new Error(
+      'No se pudo conectar con la API. ¿Hiciste redeploy después de los cambios?'
+    )
+  }
+  return error
+}
+
+// Guardar una grabación (JSON + base64: funciona en Vercel y en local)
 export async function guardarGrabacion(audioBlob, datos) {
-  const formData = new FormData()
-  formData.append('audio', audioBlob, 'grabacion.wav')
-  formData.append('hablante', JSON.stringify({
-    nombre: datos.nombre,
-    edad: datos.edad,
-    comunidad: datos.comunidad,
-    dialecto: datos.dialecto
-  }))
-  formData.append('tipoGrabacion', datos.tipoGrabacion)
-  formData.append('duracion', datos.duracion.toString())
-  formData.append('transcripcion', datos.transcripcion)
+  const audioBase64 = await blobToBase64(audioBlob)
+
+  const payload = {
+    audioBase64,
+    hablante: {
+      nombre: datos.nombre,
+      edad: datos.edad,
+      comunidad: datos.comunidad,
+      dialecto: datos.dialecto
+    },
+    tipoGrabacion: datos.tipoGrabacion,
+    duracion: datos.duracion,
+    transcripcion: datos.transcripcion || ''
+  }
 
   try {
     const response = await fetch(`${API_URL}/grabar`, {
       method: 'POST',
-      body: formData
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
     })
 
     const resultado = await parseJsonResponse(response)
 
     if (!response.ok) {
-      throw new Error(resultado.error || resultado.details || 'Error al guardar')
+      const msg = [resultado.error, resultado.details].filter(Boolean).join(': ')
+      throw new Error(msg || 'Error al guardar')
     }
-    
+
     return resultado
   } catch (error) {
-    console.error('Error en guardarGrabacion:', error)
-    throw error
+    console.error('Error en guardarGrabacion:', error, 'API_URL=', API_URL)
+    throw wrapFetchError(error)
   }
 }
 
@@ -67,12 +98,12 @@ export async function guardarGrabacion(audioBlob, datos) {
 export async function listarGrabaciones() {
   try {
     const response = await fetch(`${API_URL}/listar`)
-    const resultado = await response.json()
-    
+    const resultado = await parseJsonResponse(response)
+
     if (!response.ok) {
       throw new Error(resultado.error || 'Error al listar')
     }
-    
+
     return resultado.grabaciones || []
   } catch (error) {
     console.error('Error en listarGrabaciones:', error)
@@ -94,16 +125,16 @@ export async function corregirTranscripcion(idGrabacion, textoCorregido, textoOr
         textoOriginal
       })
     })
-    
-    const resultado = await response.json()
-    
+
+    const resultado = await parseJsonResponse(response)
+
     if (!response.ok) {
       throw new Error(resultado.error || 'Error al corregir')
     }
-    
+
     return resultado
   } catch (error) {
     console.error('Error en corregirTranscripcion:', error)
-    throw error
+    throw wrapFetchError(error)
   }
 }

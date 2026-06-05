@@ -1,4 +1,4 @@
-import { supabase } from './supabaseClient.js'
+import { supabase, assertSupabaseConfig } from './supabaseClient.js'
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') {
@@ -6,6 +6,7 @@ export default async function handler(req, res) {
   }
 
   try {
+    assertSupabaseConfig()
     const { data, error } = await supabase
       .from('grabaciones')
       .select(`
