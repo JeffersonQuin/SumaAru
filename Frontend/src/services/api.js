@@ -1,7 +1,34 @@
-// En Vercel: mismo dominio (/api). En local: Express en :3000
-const API_URL =
-  import.meta.env.VITE_API_URL ||
-  (import.meta.env.PROD ? '/api' : 'http://localhost:3000/api')
+// En producción siempre usar /api del mismo dominio (nunca localhost)
+function resolveApiUrl() {
+  const fromEnv = import.meta.env.VITE_API_URL?.trim()
+  if (import.meta.env.PROD) {
+    if (!fromEnv || /localhost|127\.0\.0\.1/i.test(fromEnv)) {
+      return '/api'
+    }
+    const base = fromEnv.replace(/\/$/, '')
+    return base.endsWith('/api') ? base : `${base}/api`
+  }
+  if (fromEnv) {
+    const base = fromEnv.replace(/\/$/, '')
+    return base.endsWith('/api') ? base : `${base}/api`
+  }
+  return 'http://localhost:3000/api'
+}
+
+const API_URL = resolveApiUrl()
+
+async function parseJsonResponse(response) {
+  const text = await response.text()
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error(
+      text.startsWith('<')
+        ? `La API no respondió JSON (${response.status}). ¿Ruta /api correcta?`
+        : text.slice(0, 120) || `Error HTTP ${response.status}`
+    )
+  }
+}
 
 // Guardar una grabación
 export async function guardarGrabacion(audioBlob, datos) {
@@ -22,11 +49,11 @@ export async function guardarGrabacion(audioBlob, datos) {
       method: 'POST',
       body: formData
     })
-    
-    const resultado = await response.json()
-    
+
+    const resultado = await parseJsonResponse(response)
+
     if (!response.ok) {
-      throw new Error(resultado.error || 'Error al guardar')
+      throw new Error(resultado.error || resultado.details || 'Error al guardar')
     }
     
     return resultado

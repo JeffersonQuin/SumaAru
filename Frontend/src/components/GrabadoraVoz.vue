@@ -318,7 +318,8 @@ const guardarGrabacionLocal = async (audioBlob) => {
     
   } catch (error) {
     console.error('Error al guardar:', error)
-    mensajeTexto.value = '❌ Error al guardar en la nube. ¿El backend está corriendo?'
+    const detalle = error?.message || 'Error desconocido'
+    mensajeTexto.value = `❌ ${detalle}`
     mensajeError.value = true
   }
 }

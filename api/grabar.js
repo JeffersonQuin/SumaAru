@@ -1,4 +1,33 @@
+import Busboy from 'busboy'
 import { supabase } from './supabaseClient.js'
+
+function parseMultipart(req) {
+  return new Promise((resolve, reject) => {
+    const fields = {}
+    let audioBuffer = null
+
+    const busboy = Busboy({ headers: req.headers })
+
+    busboy.on('file', (name, file) => {
+      const chunks = []
+      file.on('data', (chunk) => chunks.push(chunk))
+      file.on('end', () => {
+        if (name === 'audio') {
+          audioBuffer = Buffer.concat(chunks)
+        }
+      })
+    })
+
+    busboy.on('field', (name, value) => {
+      fields[name] = value
+    })
+
+    busboy.on('finish', () => resolve({ fields, audioBuffer }))
+    busboy.on('error', reject)
+
+    req.pipe(busboy)
+  })
+}
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -6,29 +35,19 @@ export default async function handler(req, res) {
   }
 
   try {
-    const chunks = []
-    for await (const chunk of req) {
-      chunks.push(chunk)
-    }
-    const buffer = Buffer.concat(chunks)
+    const { fields, audioBuffer } = await parseMultipart(req)
 
-    const contentType = req.headers['content-type'] || ''
-    const boundary = contentType.split('boundary=')[1]
-
-    if (!boundary) {
-      return res.status(400).json({ error: 'No se pudo parsear el FormData' })
+    if (!audioBuffer?.length) {
+      return res.status(400).json({ error: 'No se recibió archivo de audio' })
     }
 
-    const formData = parseMultipart(buffer, boundary)
+    const datosHablante = JSON.parse(fields.hablante || '{}')
+    const tipoGrabacion = fields.tipoGrabacion || 'historia'
+    const duracion = parseInt(fields.duracion || '0', 10)
+    const transcripcion = fields.transcripcion || ''
 
-    const audioFile = formData.audio
-    const datosHablante = JSON.parse(formData.hablante || '{}')
-    const tipoGrabacion = formData.tipoGrabacion || 'historia'
-    const duracion = parseInt(formData.duracion || '0')
-    const transcripcion = formData.transcripcion || ''
-
-    if (!audioFile || !datosHablante.nombre || !datosHablante.dialecto) {
-      return res.status(400).json({ error: 'Faltan datos obligatorios' })
+    if (!datosHablante.nombre || !datosHablante.dialecto) {
+      return res.status(400).json({ error: 'Faltan datos del hablante' })
     }
 
     const timestamp = Date.now()
@@ -37,14 +56,17 @@ export default async function handler(req, res) {
 
     const { error: audioError } = await supabase.storage
       .from('audios')
-      .upload(nombreArchivo, Buffer.from(audioFile.data), {
+      .upload(nombreArchivo, audioBuffer, {
         contentType: 'audio/wav',
         cacheControl: '3600'
       })
 
     if (audioError) {
       console.error('Error al subir a Storage:', audioError)
-      return res.status(500).json({ error: 'Error al guardar el audio' })
+      return res.status(500).json({
+        error: 'Error al guardar el audio',
+        details: audioError.message
+      })
     }
 
     const { data: urlData } = supabase.storage
@@ -69,7 +91,7 @@ export default async function handler(req, res) {
         .from('hablantes')
         .insert({
           nombre: datosHablante.nombre,
-          edad: datosHablante.edad ? parseInt(datosHablante.edad) : null,
+          edad: datosHablante.edad ? parseInt(datosHablante.edad, 10) : null,
           comunidad: datosHablante.comunidad || null,
           dialecto: datosHablante.dialecto
         })
@@ -78,7 +100,10 @@ export default async function handler(req, res) {
 
       if (hablanteError) {
         console.error('Error al guardar hablante:', hablanteError)
-        return res.status(500).json({ error: 'Error al guardar los datos del hablante' })
+        return res.status(500).json({
+          error: 'Error al guardar el hablante',
+          details: hablanteError.message
+        })
       }
 
       idHablante = nuevoHablante.id
@@ -98,66 +123,23 @@ export default async function handler(req, res) {
 
     if (grabacionError) {
       console.error('Error al guardar grabación:', grabacionError)
-      return res.status(500).json({ error: 'Error al guardar la grabación' })
+      return res.status(500).json({
+        error: 'Error al guardar la grabación',
+        details: grabacionError.message
+      })
     }
 
     return res.status(200).json({
       success: true,
       id: grabacion.id,
-      audioUrl: audioUrl,
+      audioUrl,
       mensaje: 'Grabación guardada exitosamente'
     })
-
   } catch (error) {
-    console.error('Error general:', error)
-    return res.status(500).json({ error: 'Error interno del servidor' })
+    console.error('Error general en /api/grabar:', error)
+    return res.status(500).json({
+      error: 'Error interno del servidor',
+      details: error.message
+    })
   }
-}
-
-function parseMultipart(buffer, boundary) {
-  const result = {}
-  const boundaryBuffer = Buffer.from(`--${boundary}`)
-
-  let position = 0
-  let ended = false
-
-  while (!ended && position < buffer.length) {
-    const boundaryIndex = buffer.indexOf(boundaryBuffer, position)
-    if (boundaryIndex === -1) break
-
-    position = boundaryIndex + boundaryBuffer.length
-
-    const headersEndIndex = buffer.indexOf('\r\n\r\n', position)
-    if (headersEndIndex === -1) break
-
-    const headers = buffer.subarray(position, headersEndIndex).toString()
-    position = headersEndIndex + 4
-
-    const nextBoundaryIndex = buffer.indexOf(boundaryBuffer, position)
-    if (nextBoundaryIndex === -1) {
-      ended = true
-      break
-    }
-
-    const content = buffer.subarray(position, nextBoundaryIndex - 2)
-    position = nextBoundaryIndex
-
-    const nameMatch = headers.match(/name="([^"]+)"/)
-    const filenameMatch = headers.match(/filename="([^"]+)"/)
-
-    if (nameMatch) {
-      const name = nameMatch[1]
-      if (filenameMatch) {
-        result[name] = {
-          filename: filenameMatch[1],
-          data: content,
-          contentType: headers.match(/Content-Type: ([^\r\n]+)/)?.[1] || 'application/octet-stream'
-        }
-      } else {
-        result[name] = content.toString()
-      }
-    }
-  }
-
-  return result
 }
