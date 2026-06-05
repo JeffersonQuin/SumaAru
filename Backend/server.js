@@ -44,7 +44,68 @@ app.post('/api/grabar', (req, res, next) => {
     let duracion
     let transcripcion
 
-    if (req.body?.audioBase64) {
+    if (req.body?.audioUrl) {
+      hablante = req.body.hablante
+      tipoGrabacion = req.body.tipoGrabacion
+      duracion = req.body.duracion
+      transcripcion = req.body.transcripcion
+
+      if (!hablante?.nombre || !hablante?.dialecto) {
+        return res.status(400).json({ error: 'Faltan datos del hablante' })
+      }
+
+      const audioUrl = req.body.audioUrl
+      let idHablante
+
+      const { data: hablanteExistente } = await supabase
+        .from('hablantes')
+        .select('id')
+        .eq('nombre', hablante.nombre)
+        .eq('dialecto', hablante.dialecto)
+        .maybeSingle()
+
+      if (hablanteExistente) {
+        idHablante = hablanteExistente.id
+      } else {
+        const { data: nuevoHablante, error: insertError } = await supabase
+          .from('hablantes')
+          .insert({
+            nombre: hablante.nombre,
+            edad: hablante.edad ? parseInt(hablante.edad, 10) : null,
+            comunidad: hablante.comunidad || null,
+            dialecto: hablante.dialecto
+          })
+          .select()
+          .single()
+        if (insertError) {
+          return res.status(500).json({ error: 'Error al guardar el hablante' })
+        }
+        idHablante = nuevoHablante.id
+      }
+
+      const { data: grabacion, error: grabacionError } = await supabase
+        .from('grabaciones')
+        .insert({
+          id_hablante: idHablante,
+          tipo_grabacion: tipoGrabacion || 'historia',
+          duracion_segundos: parseInt(String(duracion || '0'), 10),
+          audio_url: audioUrl,
+          transcripcion_web_speech: transcripcion || null
+        })
+        .select()
+        .single()
+
+      if (grabacionError) {
+        return res.status(500).json({ error: 'Error al guardar la grabación' })
+      }
+
+      return res.json({
+        success: true,
+        id: grabacion.id,
+        audioUrl,
+        mensaje: 'Grabación guardada exitosamente'
+      })
+    } else if (req.body?.audioBase64) {
       audioBuffer = Buffer.from(req.body.audioBase64, 'base64')
       hablante = req.body.hablante
       tipoGrabacion = req.body.tipoGrabacion

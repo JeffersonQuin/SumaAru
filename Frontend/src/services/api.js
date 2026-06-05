@@ -1,4 +1,5 @@
-// En producción siempre usar /api del mismo dominio (nunca localhost)
+import { supabase, supabaseListo } from '../lib/supabase.js'
+
 function resolveApiUrl() {
   const fromEnv = import.meta.env.VITE_API_URL?.trim()
   if (import.meta.env.PROD) {
@@ -17,7 +18,56 @@ function resolveApiUrl() {
 
 export const API_URL = resolveApiUrl()
 
-function blobToBase64(blob) {
+async function parseJsonResponse(response) {
+  const text = await response.text()
+  if (!text) {
+    throw new Error(`Respuesta vacía de la API (${response.status})`)
+  }
+  try {
+    return JSON.parse(text)
+  } catch {
+    const hint = text.includes('server error')
+      ? 'La función /api/grabar falló en Vercel (cuerpo muy grande o error interno).'
+      : text.slice(0, 120)
+    throw new Error(hint)
+  }
+}
+
+function wrapFetchError(error) {
+  if (error?.message === 'Failed to fetch') {
+    return new Error('No se pudo conectar con la API.')
+  }
+  return error
+}
+
+async function subirAudioDirecto(audioBlob, datos) {
+  const timestamp = Date.now()
+  const nombreLimpio = datos.nombre.replace(/\s/g, '_')
+  const extension = audioBlob.type?.includes('webm') ? 'webm' : 'wav'
+  const nombreArchivo = `${timestamp}_${nombreLimpio}_${datos.tipoGrabacion}.${extension}`
+
+  const { error } = await supabase.storage
+    .from('audios')
+    .upload(nombreArchivo, audioBlob, {
+      contentType: audioBlob.type || 'audio/wav',
+      cacheControl: '3600'
+    })
+
+  if (error) {
+    throw new Error(
+      `No se pudo subir el audio a Supabase: ${error.message}. ` +
+        'Revisa que el bucket "audios" permita subidas con la clave anon.'
+    )
+  }
+
+  const { data: urlData } = supabase.storage
+    .from('audios')
+    .getPublicUrl(nombreArchivo)
+
+  return urlData.publicUrl
+}
+
+async function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onloadend = () => {
@@ -26,51 +76,32 @@ function blobToBase64(blob) {
         reject(new Error('No se pudo leer el audio'))
         return
       }
-      const base64 = result.includes(',') ? result.split(',')[1] : result
-      resolve(base64)
+      resolve(result.includes(',') ? result.split(',')[1] : result)
     }
-    reader.onerror = () => reject(new Error('Error al leer el archivo de audio'))
+    reader.onerror = () => reject(new Error('Error al leer el audio'))
     reader.readAsDataURL(blob)
   })
 }
 
-async function parseJsonResponse(response) {
-  const text = await response.text()
-  try {
-    return JSON.parse(text)
-  } catch {
-    throw new Error(
-      text.startsWith('<')
-        ? `La API devolvió HTML (${response.status}). Revisa /api/grabar en Vercel.`
-        : text.slice(0, 150) || `Error HTTP ${response.status}`
-    )
-  }
-}
-
-function wrapFetchError(error) {
-  if (error?.message === 'Failed to fetch') {
-    return new Error(
-      'No se pudo conectar con la API. ¿Hiciste redeploy después de los cambios?'
-    )
-  }
-  return error
-}
-
-// Guardar una grabación (JSON + base64: funciona en Vercel y en local)
 export async function guardarGrabacion(audioBlob, datos) {
-  const audioBase64 = await blobToBase64(audioBlob)
+  const hablante = {
+    nombre: datos.nombre,
+    edad: datos.edad,
+    comunidad: datos.comunidad,
+    dialecto: datos.dialecto
+  }
 
   const payload = {
-    audioBase64,
-    hablante: {
-      nombre: datos.nombre,
-      edad: datos.edad,
-      comunidad: datos.comunidad,
-      dialecto: datos.dialecto
-    },
+    hablante,
     tipoGrabacion: datos.tipoGrabacion,
     duracion: datos.duracion,
     transcripcion: datos.transcripcion || ''
+  }
+
+  if (supabaseListo()) {
+    payload.audioUrl = await subirAudioDirecto(audioBlob, datos)
+  } else {
+    payload.audioBase64 = await blobToBase64(audioBlob)
   }
 
   try {
@@ -94,7 +125,6 @@ export async function guardarGrabacion(audioBlob, datos) {
   }
 }
 
-// Listar todas las grabaciones
 export async function listarGrabaciones() {
   try {
     const response = await fetch(`${API_URL}/listar`)
@@ -111,14 +141,11 @@ export async function listarGrabaciones() {
   }
 }
 
-// Enviar corrección de transcripción
 export async function corregirTranscripcion(idGrabacion, textoCorregido, textoOriginal) {
   try {
     const response = await fetch(`${API_URL}/corregir`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         idGrabacion,
         textoCorregido,

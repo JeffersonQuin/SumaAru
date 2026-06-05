@@ -1,35 +1,43 @@
 export async function saveGrabacion(supabase, {
   audioBuffer,
+  audioUrl,
   hablante,
   tipoGrabacion = 'historia',
   duracion = 0,
   transcripcion = ''
 }) {
-  if (!audioBuffer?.length) {
-    throw new Error('No se recibió archivo de audio')
-  }
   if (!hablante?.nombre || !hablante?.dialecto) {
     throw new Error('Faltan datos del hablante')
   }
 
-  const timestamp = Date.now()
-  const nombreLimpio = hablante.nombre.replace(/\s/g, '_')
-  const nombreArchivo = `${timestamp}_${nombreLimpio}_${tipoGrabacion}.wav`
+  let finalAudioUrl = audioUrl
 
-  const { error: audioError } = await supabase.storage
-    .from('audios')
-    .upload(nombreArchivo, audioBuffer, {
-      contentType: 'audio/wav',
-      cacheControl: '3600'
-    })
+  if (!finalAudioUrl) {
+    if (!audioBuffer?.length) {
+      throw new Error('No se recibió archivo de audio')
+    }
 
-  if (audioError) {
-    throw new Error(`Storage: ${audioError.message}`)
+    const timestamp = Date.now()
+    const nombreLimpio = hablante.nombre.replace(/\s/g, '_')
+    const nombreArchivo = `${timestamp}_${nombreLimpio}_${tipoGrabacion}.wav`
+
+    const { error: audioError } = await supabase.storage
+      .from('audios')
+      .upload(nombreArchivo, audioBuffer, {
+        contentType: 'audio/wav',
+        cacheControl: '3600'
+      })
+
+    if (audioError) {
+      throw new Error(`Storage: ${audioError.message}`)
+    }
+
+    const { data: urlData } = supabase.storage
+      .from('audios')
+      .getPublicUrl(nombreArchivo)
+
+    finalAudioUrl = urlData.publicUrl
   }
-
-  const { data: urlData } = supabase.storage
-    .from('audios')
-    .getPublicUrl(nombreArchivo)
 
   let idHablante
 
@@ -66,7 +74,7 @@ export async function saveGrabacion(supabase, {
       id_hablante: idHablante,
       tipo_grabacion: tipoGrabacion,
       duracion_segundos: parseInt(String(duracion), 10) || 0,
-      audio_url: urlData.publicUrl,
+      audio_url: finalAudioUrl,
       transcripcion_web_speech: transcripcion || null
     })
     .select()
@@ -78,6 +86,6 @@ export async function saveGrabacion(supabase, {
 
   return {
     id: grabacion.id,
-    audioUrl: urlData.publicUrl
+    audioUrl: finalAudioUrl
   }
 }
